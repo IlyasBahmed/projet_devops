@@ -2,7 +2,7 @@ trigger:
 - main
 
 pool:
-  name: Default   # self-hosted agent (ILYAS)
+  name: Default   # self-hosted agent ILYAS
 
 variables:
   APP_ENV: local
@@ -10,54 +10,82 @@ variables:
   DB_CONNECTION: sqlite
   DB_DATABASE: database/database.sqlite
 
-steps:
-- checkout: self
-  clean: true
+stages:
 
-# ---------- PHP ----------
-- powershell: |
-    php -v
-  displayName: "Check PHP"
+# ======================
+# STAGE 1: BUILD
+# ======================
+- stage: Build
+  displayName: "Build Akaunting"
+  jobs:
+  - job: BuildJob
+    displayName: "Install dependencies & build assets"
+    steps:
+    - checkout: self
+      clean: true
 
-# ---------- Composer ----------
-- powershell: |
-    composer --version
-    composer install --no-interaction --prefer-dist
-  displayName: "Composer install"
+    - powershell: |
+        php -v
+      displayName: "Check PHP"
 
-# ---------- Node / NPM ----------
-- powershell: |
-    node -v
-    npm -v
-    npm install
-    npm run build || npm run dev
-  displayName: "NPM install & build"
+    - powershell: |
+        set PHPRC=C:\xampp\php
+        composer install --no-interaction --prefer-dist
+      displayName: "Composer install"
 
-# ---------- Prepare Laravel env (SQLite for CI) ----------
-- powershell: |
-    if (!(Test-Path ".env")) {
-      Copy-Item ".env.example" ".env"
-    }
+    - powershell: |
+        node -v
+        npm -v
+        npm install
+        npm run build || npm run dev
+      displayName: "NPM install & build"
 
-    if (!(Test-Path "database")) {
-      New-Item -ItemType Directory -Path "database"
-    }
-    if (!(Test-Path "database/database.sqlite")) {
-      New-Item -ItemType File -Path "database/database.sqlite"
-    }
+# ======================
+# STAGE 2: TEST
+# ======================
+- stage: Test
+  displayName: "Test Akaunting"
+  dependsOn: Build
+  jobs:
+  - job: TestJob
+    displayName: "Prepare env, migrate & test"
+    steps:
+    - powershell: |
+        if (!(Test-Path ".env")) {
+          Copy-Item ".env.example" ".env"
+        }
 
-    php artisan key:generate
-    php artisan config:clear
-  displayName: "Prepare .env & SQLite"
+        if (!(Test-Path "database")) {
+          New-Item -ItemType Directory -Path "database"
+        }
 
-# ---------- Migrations ----------
-- powershell: |
-    php artisan migrate --force
-  displayName: "Run migrations"
+        if (!(Test-Path "database/database.sqlite")) {
+          New-Item -ItemType File -Path "database/database.sqlite"
+        }
 
-# ---------- Tests (إذا كاينين) ----------
-- powershell: |
-    if (Test-Path "artisan") {
-      php artisan test
-    }
-  displayName: "Run tests"
+        php artisan key:generate
+        php artisan config:clear
+      displayName: "Prepare .env & SQLite"
+
+    - powershell: |
+        php artisan migrate --force
+      displayName: "Run migrations"
+
+    - powershell: |
+        php artisan test
+      displayName: "Run tests"
+
+# ======================
+# STAGE 3: DEPLOY (اختياري)
+# ======================
+- stage: Deploy
+  displayName: "Deploy (placeholder)"
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+  - job: DeployJob
+    displayName: "Deploy Akaunting"
+    steps:
+    - powershell: |
+        Write-Host "Deploy stage ready (Azure App Service / VM / Docker)"
+      displayName: "Deploy step"
