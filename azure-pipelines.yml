@@ -1,0 +1,119 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  PHP_VERSION: "8.1"
+  NODE_VERSION: "20.x"
+  COMPOSER_CACHE_DIR: "$(Pipeline.Workspace)/.composer"
+  NPM_CACHE_DIR: "$(Pipeline.Workspace)/.npm"
+
+stages:
+- stage: Build_Test
+  displayName: Build & Test
+  jobs:
+  - job: build_test
+    displayName: Build and run tests
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      # Node
+      - task: NodeTool@0
+        inputs:
+          versionSpec: "$(NODE_VERSION)"
+        displayName: "Use Node $(NODE_VERSION)"
+
+      # PHP
+      - bash: |
+          sudo add-apt-repository ppa:ondrej/php -y
+          sudo apt-get update
+          sudo apt-get install -y \
+            php$(PHP_VERSION) php$(PHP_VERSION)-cli php$(PHP_VERSION)-xml php$(PHP_VERSION)-curl \
+            php$(PHP_VERSION)-mbstring php$(PHP_VERSION)-zip php$(PHP_VERSION)-bcmath \
+            php$(PHP_VERSION)-sqlite3 php$(PHP_VERSION)-gd
+          php -v
+        displayName: "Install PHP $(PHP_VERSION)"
+
+      # Cache Composer
+      - task: Cache@2
+        displayName: "Cache Composer"
+        inputs:
+          key: 'composer | "$(Agent.OS)" | composer.lock'
+          restoreKeys: |
+            composer | "$(Agent.OS)"
+          path: "$(COMPOSER_CACHE_DIR)"
+
+      - bash: |
+          curl -sS https://getcomposer.org/installer | php
+          sudo mv composer.phar /usr/local/bin/composer
+          composer --version
+          composer config cache-dir "$(COMPOSER_CACHE_DIR)"
+        displayName: "Install Composer"
+
+      - bash: |
+          composer install --no-interaction --prefer-dist --no-progress
+        displayName: "Composer install"
+
+      # Cache npm
+      - task: Cache@2
+        displayName: "Cache npm"
+        inputs:
+          key: 'npm | "$(Agent.OS)" | package-lock.json'
+          restoreKeys: |
+            npm | "$(Agent.OS)"
+          path: "$(NPM_CACHE_DIR)"
+
+      - bash: |
+          npm config set cache "$(NPM_CACHE_DIR)" --global
+          npm ci
+          npm run build || npm run dev
+        displayName: "NPM install & build"
+
+      # Laravel env for CI (SQLite)
+      - bash: |
+          cp -f .env.example .env
+
+          # Force SQLite for CI
+          sed -i 's/^DB_CONNECTION=.*/DB_CONNECTION=sqlite/g' .env || true
+          sed -i 's/^DB_DATABASE=.*/DB_DATABASE=database\/database.sqlite/g' .env || true
+
+          mkdir -p database
+          touch database/database.sqlite
+
+          php artisan key:generate
+          php artisan config:clear
+        displayName: "Prepare .env for CI"
+
+      # (Optional) migrations for tests
+      - bash: |
+          php artisan migrate --force
+        displayName: "Run migrations (SQLite)"
+        condition: succeededOrFailed()
+
+      # Tests
+      - bash: |
+          # Akaunting peut utiliser artisan test ou phpunit selon version
+          if [ -f artisan ]; then
+            php artisan test --no-interaction
+          else
+            ./vendor/bin/phpunit
+          fi
+        displayName: "Run tests"
+
+      # Publish artifact (app + built assets)
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish artifact"
+        inputs:
+          PathtoPublish: "$(Build.SourcesDirectory)"
+          ArtifactName: "akaunting"
+          publishLocation: "Container"
