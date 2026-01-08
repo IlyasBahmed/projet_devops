@@ -6,7 +6,7 @@
             <x-link href="{{ route('dashboards.create') }}" kind="primary" id="index-more-actions-new-dasboard">
                 {{ trans('general.title.new', ['type' => trans_choice('general.dashboards', 1)]) }}
             </x-link>
-        @endcan
+        @endcan 
     </x-slot>
 
     <x-slot name="content">
