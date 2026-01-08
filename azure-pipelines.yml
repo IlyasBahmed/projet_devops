@@ -1,104 +1,81 @@
 trigger:
-  branches:
-    include:
-      - main
-
-variables:
-  # === ACR ===
-  ACR_LOGIN_SERVER: 'myacr.azurecr.io'
-  IMAGE_NAME: 'akaunting'
-  TAG: '$(Build.BuildId)'
-
-  # === Azure Web App ===
-  AZURE_SUBSCRIPTION: 'My-Service-Connection-Name'   # service connection
-  WEBAPP_NAME: 'my-akaunting-webapp'                 # Azure Web App name
-  RESOURCE_GROUP: 'my-rg'
+- main
 
 stages:
-# =========================
-# STAGE 1: TEST
-# =========================
+# =====================
+# STAGE 1 : TEST
+# =====================
 - stage: test
-  displayName: "Test"
+  displayName: "Tests Akaunting"
   jobs:
   - job: phpunit
-    displayName: "PHPUnit + basic checks"
     pool:
-      vmImage: ubuntu-latest
-
+      vmImage: 'ubuntu-latest'
     steps:
-    - checkout: self
-
-    - task: DockerInstaller@0
-      displayName: "Install Docker"
-      inputs:
-        dockerVersion: '24.0.9'
-
     - script: |
-        docker build -t akaunting-test -f Dockerfile .
-      displayName: "Build test image"
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        sudo add-apt-repository ppa:ondrej/php -y
+        sudo apt-get update
 
-    - script: |
-        docker run --rm \
-          -e APP_ENV=testing \
-          -e DB_CONNECTION=sqlite \
-          -e DB_DATABASE=":memory:" \
-          akaunting-test \
-          bash -lc "php -v && composer -V && php artisan key:generate && php artisan test"
-      displayName: "Run tests (sqlite memory)"
+        # PHP + extensions nécessaires (ajuste si besoin)
+        sudo apt-get install -y php8.2 php8.2-cli php8.2-mbstring php8.2-xml php8.2-curl php8.2-zip php8.2-bcmath php8.2-intl php8.2-sqlite3 unzip git sqlite3
 
-# =========================
-# STAGE 2: BUILD
-# =========================
+        php -v
+
+        # Composer
+        curl -sS https://getcomposer.org/installer | php
+        sudo mv composer.phar /usr/local/bin/composer
+        composer --version
+
+        # Install deps + env
+        composer install --no-interaction --prefer-dist
+        cp .env.example .env || true
+        php artisan key:generate
+
+        # SQLite in-memory / local file
+        touch database/database.sqlite
+
+        # Run tests
+        php artisan test
+      displayName: "Install PHP & Run tests"
+
+# =====================
+# STAGE 2 : BUILD
+# =====================
 - stage: build
-  displayName: "Build & Push Docker Image"
+  displayName: "Build Akaunting"
   dependsOn: test
   condition: succeeded()
   jobs:
-  - job: build_push
+  - job: build_app
     pool:
-      vmImage: ubuntu-latest
+      vmImage: 'ubuntu-latest'
     steps:
-    - checkout: self
+    - script: |
+        sudo apt-get update
+        sudo apt-get install -y software-properties-common
+        sudo add-apt-repository ppa:ondrej/php -y
+        sudo apt-get update
 
-    - task: Docker@2
-      displayName: "Login to ACR"
-      inputs:
-        command: login
-        containerRegistry: 'My-ACR-Service-Connection'  # ACR service connection
+        sudo apt-get install -y php8.2 php8.2-cli php8.2-mbstring php8.2-xml php8.2-curl php8.2-zip php8.2-bcmath php8.2-intl unzip git
+        php -v
 
-    - task: Docker@2
-      displayName: "Build & Push"
-      inputs:
-        command: buildAndPush
-        repository: '$(IMAGE_NAME)'
-        dockerfile: 'Dockerfile'
-        containerRegistry: 'My-ACR-Service-Connection'
-        tags: |
-          $(TAG)
-          latest
+        # Composer
+        curl -sS https://getcomposer.org/installer | php
+        sudo mv composer.phar /usr/local/bin/composer
 
-# =========================
-# STAGE 3: DEPLOY
-# =========================
-- stage: deploy
-  displayName: "Deploy to Azure Web App (Container)"
-  dependsOn: build
-  condition: succeeded()
-  jobs:
-  - deployment: deploy_webapp
-    displayName: "Deploy"
-    environment: "production"
-    pool:
-      vmImage: ubuntu-latest
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - task: AzureWebAppContainer@1
-            displayName: "Deploy container to Web App"
-            inputs:
-              azureSubscription: '$(AZURE_SUBSCRIPTION)'
-              appName: '$(WEBAPP_NAME)'
-              containers: |
-                $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(TAG)
+        # Node
+        curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        node -v
+        npm -v
+
+        # Build
+        composer install --no-dev --optimize-autoloader --no-interaction
+        npm install
+        npm run build
+      displayName: "Install PHP & Node, then build"
+
+    - publish: .
+      artifact: akaunting-build
