@@ -2,90 +2,70 @@ trigger:
 - main
 
 pool:
-  name: Default   # self-hosted agent ILYAS
+  name: Default   # self-hosted agent (ILYAS)
 
 variables:
-  APP_ENV: local
-  APP_DEBUG: true
+  APP_ENV: testing
   DB_CONNECTION: sqlite
-  DB_DATABASE: database/database.sqlite
+  DB_DATABASE: ":memory:"
+  CACHE_DRIVER: array
+  SESSION_DRIVER: array
+  QUEUE_CONNECTION: sync
 
 stages:
-
-# ======================
-# STAGE 1: BUILD
-# ======================
-- stage: Build
-  displayName: "Build Akaunting"
+- stage: Test
   jobs:
-  - job: BuildJob
-    displayName: "Install dependencies & build assets"
+  - job: PhpUnit
+    displayName: "PHPUnit (Laravel)"
     steps:
     - checkout: self
       clean: true
 
+    # Prepare .env early so composer scripts don't fail
     - powershell: |
-        php -v
-      displayName: "Check PHP"
+        if (!(Test-Path ".env")) { Copy-Item ".env.example" ".env" }
+
+        # Ensure sqlite file exists (safer than :memory: for some composer/artisan hooks)
+        if (!(Test-Path "database")) { New-Item -ItemType Directory -Path "database" | Out-Null }
+        if (!(Test-Path "database/database.sqlite")) { New-Item -ItemType File -Path "database/database.sqlite" | Out-Null }
+
+        Add-Content .env "`nAPP_ENV=testing"
+        Add-Content .env "`nDB_CONNECTION=sqlite"
+        Add-Content .env "`nDB_DATABASE=database/database.sqlite"
+        Add-Content .env "`nCACHE_DRIVER=array"
+        Add-Content .env "`nSESSION_DRIVER=array"
+        Add-Content .env "`nQUEUE_CONNECTION=sync"
+
+        php artisan key:generate
+        New-Item -ItemType Directory -Force -Path "storage/test-reports" | Out-Null
+      displayName: "Prepare Laravel env (before composer)"
 
     - powershell: |
         set PHPRC=C:\xampp\php
+        php -v
+        composer --version
         composer install --no-interaction --prefer-dist
       displayName: "Composer install"
 
     - powershell: |
-        node -v
-        npm -v
-        npm install
-        npm run build || npm run dev
-      displayName: "NPM install & build"
-
-# ======================
-# STAGE 2: TEST
-# ======================
-- stage: Test
-  displayName: "Test Akaunting"
-  dependsOn: Build
-  jobs:
-  - job: TestJob
-    displayName: "Prepare env, migrate & test"
-    steps:
-    - powershell: |
-        if (!(Test-Path ".env")) {
-          Copy-Item ".env.example" ".env"
-        }
-
-        if (!(Test-Path "database")) {
-          New-Item -ItemType Directory -Path "database"
-        }
-
-        if (!(Test-Path "database/database.sqlite")) {
-          New-Item -ItemType File -Path "database/database.sqlite"
-        }
-
-        php artisan key:generate
-        php artisan config:clear
-      displayName: "Prepare .env & SQLite"
-
-    - powershell: |
         php artisan migrate --force
-      displayName: "Run migrations"
+      displayName: "Migrate"
 
     - powershell: |
-        php artisan test
-      displayName: "Run tests"
+        php vendor/bin/phpunit --log-junit storage/test-reports/junit.xml
+      displayName: "Run PHPUnit"
 
-# ======================
-# STAGE 3: DEPLOY (اختياري)
-# ======================
-- stage: Deploy
-  displayName: "Deploy (placeholder)"
-  dependsOn: Test
-  condition: succeeded()
-  jobs:
-  - job: DeployJob
-    displayName: "Deploy Akaunting"
-    steps:
-    - powershell: |
-        Write-Host "Deploy stage ready (Azure App Service / VM / Docker)"
-      displayName: "Deploy step"
+    - task: PublishTestResults@2
+      displayName: "Publish JUnit results"
+      condition: always()
+      inputs:
+        testResultsFormat: "JUnit"
+        testResultsFiles: "storage/test-reports/junit.xml"
+        failTaskOnFailedTests: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish test reports artifact"
+      condition: always()
+      inputs:
+        PathtoPublish: "storage/test-reports"
+        ArtifactName: "test-reports"
