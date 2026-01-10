@@ -1,0 +1,375 @@
+trigger:
+- main
+
+# (اختياري) إذا عندك Variable Group فيها secrets
+# variables:
+# - group: akaunting-secrets
+
+variables:
+  # ---------- AGENT ----------
+  AGENT_POOL: 'self-hosted'
+  AGENT_NAME: 'ILYAS'
+
+  # ---------- CACHES ----------
+  COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
+  NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
+
+  # ---------- SONARQUBE CLOUD (QubeCloud) ----------
+  SONAR_SC: 'SonarCloudSC'          # اسم Service Connection ديال SonarQube Cloud
+  SONAR_ORG: 'YOUR_SONAR_ORG'
+  SONAR_PROJECT_KEY: 'YOUR_PROJECT_KEY'
+  SONAR_PROJECT_NAME: 'Akaunting'
+
+  # ---------- DOCKER ----------
+  DOCKER_SC: 'DockerHubSC'          # اسم Docker Registry Service Connection
+  DOCKER_REPO: 'youruser/akaunting' # repo فـ DockerHub أو ACR
+  IMAGE_TAG: '$(Build.BuildId)'
+
+  # ---------- DEPLOY (local docker host = نفس الماكينة ديال agent) ----------
+  DEPLOY_PORT: '8080'
+  DEPLOY_ENV_FILE: '$(Pipeline.Workspace)\deploy.env'
+
+stages:
+# =========================
+# STAGE 1 : TEST
+# =========================
+- stage: test
+  displayName: "Test Akaunting"
+  jobs:
+  - job: phpunit
+    displayName: "Run Laravel tests"
+    pool:
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
+
+    steps:
+    - checkout: self
+      clean: true
+
+    - task: Cache@2
+      inputs:
+        key: 'composer | "$(Agent.OS)" | composer.lock'
+        restoreKeys: |
+          composer | "$(Agent.OS)"
+        path: $(COMPOSER_CACHE_DIR)
+      displayName: "Cache Composer"
+
+    - powershell: |
+        php -v
+        composer --version
+        node -v
+        npm -v
+      displayName: "Check versions"
+
+    - powershell: |
+        Write-Host "=== Cleanup temp ==="
+        if (Test-Path $env:TEMP) {
+          Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { }
+          }
+        }
+        Get-PSDrive C | Format-Table -AutoSize
+      displayName: "Free space (cleanup)"
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        # Composer cache
+        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
+
+        # Prepare env (sqlite)
+        if (!(Test-Path ".env")) {
+          if (Test-Path ".env.example") { Copy-Item ".env.example" ".env" }
+          elseif (Test-Path ".env.testing") { Copy-Item ".env.testing" ".env" }
+          else {
+            $lines = @(
+              "APP_ENV=testing",
+              "APP_KEY=",
+              "APP_DEBUG=true",
+              "LOG_CHANNEL=stack",
+              "",
+              "DB_CONNECTION=sqlite",
+              "DB_DATABASE=database/database.sqlite",
+              "",
+              "CACHE_DRIVER=array",
+              "SESSION_DRIVER=array",
+              "QUEUE_CONNECTION=sync"
+            )
+            Set-Content -Path ".env" -Value $lines -Encoding utf8
+          }
+        }
+
+        New-Item -ItemType Directory -Force -Path "database" | Out-Null
+        if (!(Test-Path "database/database.sqlite")) {
+          New-Item -ItemType File -Force "database/database.sqlite" | Out-Null
+        }
+
+        composer config -g preferred-install dist
+        composer config -g process-timeout 2000
+
+        composer install --no-interaction --prefer-dist --no-progress
+        php artisan key:generate --force
+        php artisan test
+      displayName: "Composer install + Artisan test"
+
+# =========================
+# STAGE 2 : SECURITY (SonarQube Cloud)
+# =========================
+- stage: security
+  displayName: "Security (QubeCloud / SonarQube Cloud)"
+  dependsOn: test
+  condition: succeeded()
+  jobs:
+  - job: sonar
+    displayName: "SonarQube Cloud analysis"
+    pool:
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
+
+    steps:
+    - checkout: self
+      clean: true
+
+    - powershell: |
+        java -version
+      displayName: "Check Java (required for scanner)"
+      # إذا ماكانش Java منصّب فـ agent، هاد step غادي يطيح.
+      # self-hosted agents خاصهم Java minimal :contentReference[oaicite:3]{index=3}
+
+    # SonarQube Cloud tasks: SonarCloudPrepare/Analyze/Publish :contentReference[oaicite:4]{index=4}
+    -- task: SonarCloudPrepare@4
+  inputs:
+    SonarCloud: '$(SONAR_SC)'
+    organization: '$(SONAR_ORG)'
+    scannerMode: 'cli'
+    configMode: 'manual'
+    cliProjectKey: '$(SONAR_PROJECT_KEY)'
+    cliProjectName: '$(SONAR_PROJECT_NAME)'
+    cliSources: '.'
+    extraProperties: |
+      sonar.sourceEncoding=UTF-8
+      sonar.exclusions=vendor/**,node_modules/**,storage/**,dist/**,public/**,bootstrap/cache/**,**/*.min.js
+  displayName: "SonarCloud Prepare"
+
+# (اختياري) ثبّت/حدد JAVA_HOME على JDK 17 في جهاز الـ Agent
+- powershell: |
+    $ErrorActionPreference = "Stop"
+    # عدّل المسار حسب مكان Java عندك
+    $env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
+    $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
+    java -version
+  displayName: "Set JAVA_HOME to JDK 17"
+
+- task: SonarCloudAnalyze@4
+  inputs:
+    jdkversion: 'JAVA_HOME'
+  displayName: "SonarCloud Analyze"
+
+- task: SonarCloudPublish@4
+  inputs:
+    pollingTimeoutSec: '120'
+  displayName: "SonarCloud Quality Gate"
+
+# =========================
+# STAGE 3 : BUILD DIST + ZIP
+# =========================
+- stage: build
+  displayName: "Build (dist + zip)"
+  dependsOn: security
+  condition: succeeded()
+  jobs:
+  - job: build_app
+    displayName: "Build & Package"
+    pool:
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
+
+    steps:
+    - checkout: self
+      clean: true
+
+    - task: Cache@2
+      inputs:
+        key: 'composer | "$(Agent.OS)" | composer.lock'
+        restoreKeys: |
+          composer | "$(Agent.OS)"
+        path: $(COMPOSER_CACHE_DIR)
+      displayName: "Cache Composer"
+
+    - task: Cache@2
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(NPM_CACHE_DIR)
+      displayName: "Cache NPM"
+
+    # ---------- BACKEND ----------
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
+        composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
+      displayName: "Composer install (prod)"
+
+    # ---------- FRONTEND ----------
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        npm config set cache "$(NPM_CACHE_DIR)" --global
+        npm config set registry https://registry.npmjs.org/
+        npm config set fetch-retries 8
+        npm config set fetch-retry-mintimeout 30000
+        npm config set fetch-retry-maxtimeout 240000
+        npm config set fetch-timeout 600000
+        npm config set network-timeout 600000
+
+        if (Test-Path "package-lock.json") { npm ci --no-audit --no-fund }
+        else { npm install --no-audit --no-fund }
+
+        $env:PATH = "$(Resolve-Path .)\node_modules\.bin;$env:PATH"
+        .\node_modules\.bin\mix.cmd --production
+      displayName: "Frontend build (Laravel Mix)"
+
+    # ---------- PREPARE DIST ----------
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $dist = "$(Build.SourcesDirectory)\dist"
+        if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+        robocopy "$(Build.SourcesDirectory)" "$dist" /MIR `
+          /XD ".git" ".github" "node_modules" "tests" "storage" "dist" `
+          /XF ".env" | Out-Null
+
+        $rc = $LASTEXITCODE
+        Write-Host "Robocopy exit code: $rc"
+        if ($rc -ge 8) { throw "Robocopy failed with exit code $rc" }
+
+        # مهم: رجّع exit code = 0 باش Azure ما يطيّحش step
+        $global:LASTEXITCODE = 0
+
+        New-Item -ItemType Directory -Force -Path "$dist\storage\framework" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$dist\storage\logs" | Out-Null
+
+        Write-Host "Dist file count:"
+        (Get-ChildItem $dist -Recurse | Measure-Object).Count
+      displayName: "Prepare dist folder"
+
+    # ---------- ZIP ----------
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        $dist = "$(Build.SourcesDirectory)\dist"
+        $zip  = "$(Build.ArtifactStagingDirectory)\akaunting.zip"
+
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        if (Test-Path $zip) { Remove-Item $zip -Force }
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($dist, $zip)
+
+        Write-Host "ZIP ready: $zip"
+      displayName: "Create ZIP"
+
+    # ---------- PUBLISH ARTIFACTS (Pipeline artifacts) ----------
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)\akaunting.zip'
+        artifactName: 'akaunting-zip'
+      displayName: "Publish ZIP"
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.SourcesDirectory)\dist'
+        artifactName: 'akaunting-dist'
+      displayName: "Publish dist"
+
+# =========================
+# STAGE 4 : DOCKER BUILD + PUSH
+# =========================
+- stage: docker
+  displayName: "Docker build & push"
+  dependsOn: build
+  condition: succeeded()
+  jobs:
+  - job: docker_build
+    displayName: "Build and push image"
+    pool:
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
+
+    steps:
+    - checkout: self
+      clean: true
+
+    - download: current
+      artifact: akaunting-dist
+      displayName: "Download dist artifact"
+
+    - task: Docker@2
+      inputs:
+        command: login
+        containerRegistry: '$(DOCKER_SC)'
+      displayName: "Docker login"
+
+    # Build context = dist artifact (فيها vendor + built assets)
+    - task: Docker@2
+      inputs:
+        containerRegistry: '$(DOCKER_SC)'
+        repository: '$(DOCKER_REPO)'
+        command: 'buildAndPush'
+        Dockerfile: '$(Build.SourcesDirectory)\Dockerfile'
+        buildContext: '$(Pipeline.Workspace)\akaunting-dist'
+        tags: |
+          $(IMAGE_TAG)
+          latest
+      displayName: "Docker build & push"
+
+# =========================
+# STAGE 5 : DEPLOY (Docker Compose)
+# =========================
+- stage: deploy
+  displayName: "Deploy to Docker (compose)"
+  dependsOn: docker
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: deploy_local
+    displayName: "Deploy on agent machine"
+    pool:
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
+
+    steps:
+    - checkout: self
+      clean: true
+
+    - task: Docker@2
+      inputs:
+        command: login
+        containerRegistry: '$(DOCKER_SC)'
+      displayName: "Docker login (deploy)"
+
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        # ملف env للـ docker-compose (بدّل DB_* حسب متغيراتك/Secrets)
+        $lines = @(
+          "DOCKER_REPO=$(DOCKER_REPO)",
+          "IMAGE_TAG=$(IMAGE_TAG)",
+          "APP_PORT=$(DEPLOY_PORT)",
+          "DB_HOST=db",
+          "DB_DATABASE=akaunting",
+          "DB_USERNAME=akaunting",
+          "DB_PASSWORD=ChangeMeStrongPassword"
+        )
+        Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
+
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans
+
+        docker ps
+      displayName: "docker compose pull + up"
