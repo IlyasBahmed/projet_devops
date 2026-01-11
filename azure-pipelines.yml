@@ -17,7 +17,7 @@ variables:
   # ---------- SONARCLOUD PROJECT ----------
   SONAR_ORG: 'bahmedilyas2'
   SONAR_PROJECT_KEY: 'bahmedilyas2_projet_devops'
-  SONAR_PROJECT_NAME: 'projet_devops'
+  SONAR_PROJECT_NAME: 'projet_devops.git'
 
   # ---------- DOCKER ----------
   DOCKER_REPO: 'ilyase25/akaunting'   # لازم تكون username/repo
