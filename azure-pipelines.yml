@@ -9,6 +9,7 @@ variables:
   # ---------- CACHES ----------
   COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
   NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
+  TRIVY_CACHE_DIR: '$(Pipeline.Workspace)\.trivy'
 
   # ---------- DOCKER ----------
   DOCKER_SC: 'DockerHubSC'
@@ -35,6 +36,12 @@ stages:
     steps:
     - checkout: self
       clean: true
+
+    # ✅ FIX: create cache folders BEFORE Cache@2 (prevents tar chdir error)
+    - powershell: |
+        New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
+      displayName: "Create cache folders"
 
     - task: Cache@2
       inputs:
@@ -104,7 +111,13 @@ stages:
     - checkout: self
       clean: true
 
-    # Optional: re-use npm cache if needed later (not required here)
+    # ✅ create security cache folders
+    - powershell: |
+        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$(TRIVY_CACHE_DIR)" | Out-Null
+      displayName: "Create security cache folders"
+
+    # (Optional) re-use npm cache (not required but fine)
     - task: Cache@2
       inputs:
         key: 'npm | "$(Agent.OS)" | package-lock.json'
@@ -112,6 +125,15 @@ stages:
           npm | "$(Agent.OS)"
         path: $(NPM_CACHE_DIR)
       displayName: "Cache NPM (security)"
+
+    # ✅ Trivy DB cache (speeds up scanning)
+    - task: Cache@2
+      inputs:
+        key: 'trivy | "$(Agent.OS)"'
+        restoreKeys: |
+          trivy | "$(Agent.OS)"
+        path: $(TRIVY_CACHE_DIR)
+      displayName: "Cache Trivy DB"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
@@ -138,8 +160,12 @@ stages:
           winget install -e --id AquaSecurity.Trivy --accept-source-agreements --accept-package-agreements
         }
 
+        $env:TRIVY_CACHE_DIR = "$(TRIVY_CACHE_DIR)"
+
         trivy --version
         $img = "$(DOCKER_REPO):scan-$(Build.BuildId)"
+
+        # Fail on HIGH/CRITICAL
         trivy image --severity HIGH,CRITICAL --exit-code 1 $img
       displayName: "Trivy (image vuln scan)"
 
