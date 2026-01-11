@@ -6,7 +6,7 @@ variables:
   AGENT_POOL: 'self-hosted'
   AGENT_NAME: 'ILYAS'
 
-  # ---------- JAVA (ضع المسار الصحيح عندك) ----------
+  # ---------- JAVA (Windows Temurin) ----------
   JAVA_HOME_WIN: 'C:\Program Files\Eclipse Adoptium\jdk-17.0.17.10-hotspot'
 
   # ---------- CACHES ----------
@@ -128,16 +128,31 @@ stages:
     - checkout: self
       clean: true
 
-    # ✅ ضمان Java داخل نفس الـ Job (حتى لو Service PATH قديم)
+    # ✅ Fix Java: works in same step + for next SonarCloud tasks
     - powershell: |
+        $ErrorActionPreference = "Stop"
+
         $javaHome = "$(JAVA_HOME_WIN)"
-        Write-Host "Setting JAVA_HOME=$javaHome"
+        $javaExe  = Join-Path $javaHome "bin\java.exe"
+
+        Write-Host "JAVA_HOME (intended) = $javaHome"
+
+        if (!(Test-Path $javaExe)) {
+          throw "java.exe not found at: $javaExe"
+        }
+
+        # inside THIS step
+        $env:JAVA_HOME = $javaHome
+        $env:Path = "$javaHome\bin;$env:Path"
+
+        # for NEXT tasks
         Write-Host "##vso[task.setvariable variable=JAVA_HOME]$javaHome"
         Write-Host "##vso[task.prependpath]$javaHome\bin"
 
+        Write-Host "=== Debug ==="
         cmd /c where java
-        java -version
-      displayName: "Ensure Java for Sonar (prepend PATH)"
+        & $javaExe -version
+      displayName: "Ensure Java for Sonar (fix PATH + verify)"
 
     - task: SonarCloudPrepare@4
       inputs:
@@ -339,6 +354,7 @@ stages:
         )
         Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
 
+        docker compose version
         docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
         docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans
         docker ps
