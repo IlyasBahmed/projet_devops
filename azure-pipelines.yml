@@ -6,11 +6,14 @@ variables:
   AGENT_POOL: 'self-hosted'
   AGENT_NAME: 'ILYAS'
 
+  # ---------- JAVA (ضع المسار الصحيح عندك) ----------
+  JAVA_HOME_WIN: 'C:\Program Files\Eclipse Adoptium\jdk-17.0.17.10-hotspot'
+
   # ---------- CACHES ----------
   COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
   NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
 
-  # ---------- SERVICE CONNECTIONS (حسب صورتك) ----------
+  # ---------- SERVICE CONNECTIONS ----------
   SONAR_SC: 'SonarCloudSC'
   DOCKER_SC: 'DockerHubSC'
 
@@ -20,7 +23,7 @@ variables:
   SONAR_PROJECT_NAME: 'projet_devops.git'
 
   # ---------- DOCKER ----------
-  DOCKER_REPO: 'ilyase25/akaunting'   # لازم تكون username/repo
+  DOCKER_REPO: 'ilyase25/akaunting'
   IMAGE_TAG: '$(Build.BuildId)'
 
   # ---------- DEPLOY ----------
@@ -125,9 +128,16 @@ stages:
     - checkout: self
       clean: true
 
+    # ✅ ضمان Java داخل نفس الـ Job (حتى لو Service PATH قديم)
     - powershell: |
+        $javaHome = "$(JAVA_HOME_WIN)"
+        Write-Host "Setting JAVA_HOME=$javaHome"
+        Write-Host "##vso[task.setvariable variable=JAVA_HOME]$javaHome"
+        Write-Host "##vso[task.prependpath]$javaHome\bin"
+
+        cmd /c where java
         java -version
-      displayName: "Check Java"
+      displayName: "Ensure Java for Sonar (prepend PATH)"
 
     - task: SonarCloudPrepare@4
       inputs:
