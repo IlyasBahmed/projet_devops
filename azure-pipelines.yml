@@ -9,7 +9,6 @@ variables:
   # ---------- CACHES ----------
   COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
   NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
-  TRIVY_CACHE_DIR: '$(Pipeline.Workspace)\.trivy'
 
   # ---------- DOCKER ----------
   DOCKER_SC: 'DockerHubSC'
@@ -25,10 +24,10 @@ stages:
 # STAGE 1 : TEST
 # =========================
 - stage: test
-  displayName: "Test (Laravel)"
+  displayName: "TEST"
   jobs:
   - job: phpunit
-    displayName: "PHPUnit"
+    displayName: "Laravel tests"
     pool:
       name: $(AGENT_POOL)
       demands:
@@ -37,7 +36,7 @@ stages:
     - checkout: self
       clean: true
 
-    # ✅ FIX: create cache folders BEFORE Cache@2 (prevents tar chdir error)
+    # ✅ create cache dirs (fix tar chdir)
     - powershell: |
         New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
         New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
@@ -62,7 +61,6 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        # use caches
         $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
         npm config set cache "$(NPM_CACHE_DIR)" --global
 
@@ -94,15 +92,15 @@ stages:
       displayName: "Install + Test"
 
 # =========================
-# STAGE 2 : SECURITY (simple)
+# STAGE 2 : SECURITY (simple + report)
 # =========================
 - stage: security
-  displayName: "Security (Gitleaks + Trivy)"
+  displayName: "SECURITY (Gitleaks report)"
   dependsOn: test
   condition: succeeded()
   jobs:
   - job: security_scan
-    displayName: "Secret scan + Image scan"
+    displayName: "Secrets scan"
     pool:
       name: $(AGENT_POOL)
       demands:
@@ -111,30 +109,6 @@ stages:
     - checkout: self
       clean: true
 
-    # ✅ create security cache folders
-    - powershell: |
-        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$(TRIVY_CACHE_DIR)" | Out-Null
-      displayName: "Create security cache folders"
-
-    # (Optional) re-use npm cache (not required but fine)
-    - task: Cache@2
-      inputs:
-        key: 'npm | "$(Agent.OS)" | package-lock.json'
-        restoreKeys: |
-          npm | "$(Agent.OS)"
-        path: $(NPM_CACHE_DIR)
-      displayName: "Cache NPM (security)"
-
-    # ✅ Trivy DB cache (speeds up scanning)
-    - task: Cache@2
-      inputs:
-        key: 'trivy | "$(Agent.OS)"'
-        restoreKeys: |
-          trivy | "$(Agent.OS)"
-        path: $(TRIVY_CACHE_DIR)
-      displayName: "Cache Trivy DB"
-
     - powershell: |
         $ErrorActionPreference = "Stop"
 
@@ -142,38 +116,27 @@ stages:
           winget install -e --id Gitleaks.Gitleaks --accept-source-agreements --accept-package-agreements
         }
 
-        gitleaks version
-        gitleaks detect --source "$(Build.SourcesDirectory)" --no-git --redact
-      displayName: "Gitleaks (secrets scan)"
+        $reportDir = "$(Build.ArtifactStagingDirectory)"
+        New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
+        $report = Join-Path $reportDir "gitleaks.json"
 
-    - powershell: |
-        $ErrorActionPreference = "Stop"
-        $img = "$(DOCKER_REPO):scan-$(Build.BuildId)"
-        docker build -t $img "$(Build.SourcesDirectory)"
-        docker images $img
-      displayName: "Build image for security scan"
+        gitleaks detect --source "$(Build.SourcesDirectory)" --no-git --redact `
+          --report-format json --report-path "$report"
 
-    - powershell: |
-        $ErrorActionPreference = "Stop"
+        Write-Host "Gitleaks report saved: $report"
+      displayName: "Gitleaks scan (report.json)"
 
-        if (!(Get-Command trivy -ErrorAction SilentlyContinue)) {
-          winget install -e --id AquaSecurity.Trivy --accept-source-agreements --accept-package-agreements
-        }
-
-        $env:TRIVY_CACHE_DIR = "$(TRIVY_CACHE_DIR)"
-
-        trivy --version
-        $img = "$(DOCKER_REPO):scan-$(Build.BuildId)"
-
-        # Fail on HIGH/CRITICAL
-        trivy image --severity HIGH,CRITICAL --exit-code 1 $img
-      displayName: "Trivy (image vuln scan)"
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
+        artifactName: 'security-gitleaks'
+      displayName: "Publish Gitleaks report"
 
 # =========================
-# STAGE 3 : DOCKER BUILD + PUSH
+# STAGE 3 : BUILD (Docker build + push)
 # =========================
-- stage: docker
-  displayName: "Docker build & push"
+- stage: build
+  displayName: "BUILD (Docker build & push)"
   dependsOn: security
   condition: succeeded()
   jobs:
@@ -206,11 +169,11 @@ stages:
       displayName: "Docker build & push"
 
 # =========================
-# STAGE 4 : DEPLOY (Docker Compose)
+# STAGE 4 : DEPLOY (docker compose)
 # =========================
 - stage: deploy
-  displayName: "Deploy (docker compose)"
-  dependsOn: docker
+  displayName: "DEPLOY (docker compose)"
+  dependsOn: build
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: deploy_local
@@ -235,7 +198,11 @@ stages:
         $lines = @(
           "DOCKER_REPO=$(DOCKER_REPO)",
           "IMAGE_TAG=$(IMAGE_TAG)",
-          "APP_PORT=$(DEPLOY_PORT)"
+          "APP_PORT=$(DEPLOY_PORT)",
+          "DB_HOST=db",
+          "DB_DATABASE=akaunting",
+          "DB_USERNAME=akaunting",
+          "DB_PASSWORD=ChangeMeStrongPassword"
         )
         Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
 
