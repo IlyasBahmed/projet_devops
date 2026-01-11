@@ -6,6 +6,10 @@ variables:
   AGENT_POOL: 'self-hosted'
   AGENT_NAME: 'ILYAS'
 
+  # ---------- CACHES ----------
+  COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
+  NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
+
   # ---------- DOCKER ----------
   DOCKER_SC: 'DockerHubSC'
   DOCKER_REPO: 'ilyase25/akaunting'
@@ -32,8 +36,28 @@ stages:
     - checkout: self
       clean: true
 
+    - task: Cache@2
+      inputs:
+        key: 'composer | "$(Agent.OS)" | composer.lock'
+        restoreKeys: |
+          composer | "$(Agent.OS)"
+        path: $(COMPOSER_CACHE_DIR)
+      displayName: "Cache Composer"
+
+    - task: Cache@2
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(NPM_CACHE_DIR)
+      displayName: "Cache NPM"
+
     - powershell: |
         $ErrorActionPreference = "Stop"
+
+        # use caches
+        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
+        npm config set cache "$(NPM_CACHE_DIR)" --global
 
         if (!(Test-Path ".env")) {
           if (Test-Path ".env.example") { Copy-Item ".env.example" ".env" }
@@ -80,12 +104,17 @@ stages:
     - checkout: self
       clean: true
 
-    # ---- Gitleaks (secrets) ----
+    # Optional: re-use npm cache if needed later (not required here)
+    - task: Cache@2
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(NPM_CACHE_DIR)
+      displayName: "Cache NPM (security)"
+
     - powershell: |
         $ErrorActionPreference = "Stop"
-        if (!(Get-Command winget -ErrorAction SilentlyContinue)) {
-          throw "winget not found on this agent."
-        }
 
         if (!(Get-Command gitleaks -ErrorAction SilentlyContinue)) {
           winget install -e --id Gitleaks.Gitleaks --accept-source-agreements --accept-package-agreements
@@ -95,7 +124,6 @@ stages:
         gitleaks detect --source "$(Build.SourcesDirectory)" --no-git --redact
       displayName: "Gitleaks (secrets scan)"
 
-    # ---- Build image locally for scan (no push) ----
     - powershell: |
         $ErrorActionPreference = "Stop"
         $img = "$(DOCKER_REPO):scan-$(Build.BuildId)"
@@ -103,18 +131,15 @@ stages:
         docker images $img
       displayName: "Build image for security scan"
 
-    # ---- Trivy (image vulnerabilities) ----
     - powershell: |
         $ErrorActionPreference = "Stop"
+
         if (!(Get-Command trivy -ErrorAction SilentlyContinue)) {
           winget install -e --id AquaSecurity.Trivy --accept-source-agreements --accept-package-agreements
         }
 
         trivy --version
-
         $img = "$(DOCKER_REPO):scan-$(Build.BuildId)"
-
-        # Fail on HIGH/CRITICAL only (simple + practical)
         trivy image --severity HIGH,CRITICAL --exit-code 1 $img
       displayName: "Trivy (image vuln scan)"
 
