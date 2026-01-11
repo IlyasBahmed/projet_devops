@@ -92,7 +92,7 @@ stages:
       displayName: "Install + Test"
 
 # =========================
-# STAGE 2 : SECURITY (simple + report)
+# STAGE 2 : SECURITY (Gitleaks report) ✅ FIXED (no winget)
 # =========================
 - stage: security
   displayName: "SECURITY (Gitleaks report)"
@@ -112,19 +112,41 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        if (!(Get-Command gitleaks -ErrorAction SilentlyContinue)) {
-          winget install -e --id Gitleaks.Gitleaks --accept-source-agreements --accept-package-agreements
-        }
+        # 1) Get latest Gitleaks release from GitHub
+        $release = Invoke-RestMethod -Headers @{ "User-Agent" = "azdo-agent" } `
+          -Uri "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
 
+        # 2) Pick Windows x64 zip
+        $asset = $release.assets | Where-Object { $_.name -match "windows_x64\.zip$" } | Select-Object -First 1
+        if (-not $asset) { throw "Gitleaks Windows x64 zip not found in latest release." }
+
+        # 3) Download + extract inside Pipeline workspace
+        $toolsDir = "$(Pipeline.Workspace)\tools\gitleaks"
+        New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+
+        $zipPath = Join-Path $toolsDir $asset.name
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+
+        Expand-Archive -Path $zipPath -DestinationPath $toolsDir -Force
+
+        # 4) Locate gitleaks.exe
+        $gitleaksExe = Get-ChildItem -Path $toolsDir -Recurse -Filter "gitleaks.exe" | Select-Object -First 1
+        if (-not $gitleaksExe) { throw "gitleaks.exe not found after extract." }
+
+        # Verify tool works
+        & $gitleaksExe.FullName version
+
+        # 5) Create report
         $reportDir = "$(Build.ArtifactStagingDirectory)"
         New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
         $report = Join-Path $reportDir "gitleaks.json"
 
-        gitleaks detect --source "$(Build.SourcesDirectory)" --no-git --redact `
+        # 6) Scan
+        & $gitleaksExe.FullName detect --source "$(Build.SourcesDirectory)" --no-git --redact `
           --report-format json --report-path "$report"
 
-        Write-Host "Gitleaks report saved: $report"
-      displayName: "Gitleaks scan (report.json)"
+        Write-Host "✅ Gitleaks report saved: $report"
+      displayName: "Gitleaks scan (downloaded binary)"
 
     - task: PublishPipelineArtifact@1
       inputs:
