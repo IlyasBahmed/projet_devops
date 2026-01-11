@@ -1,10 +1,6 @@
 trigger:
 - main
 
-# (اختياري) إذا عندك Variable Group فيها secrets
-# variables:
-# - group: akaunting-secrets
-
 variables:
   # ---------- AGENT ----------
   AGENT_POOL: 'self-hosted'
@@ -14,18 +10,20 @@ variables:
   COMPOSER_CACHE_DIR: '$(Pipeline.Workspace)\.composer'
   NPM_CACHE_DIR: '$(Pipeline.Workspace)\.npm'
 
-  # ---------- SONARQUBE CLOUD (QubeCloud) ----------
-  SONAR_SC: 'SonarCloudSC'          # اسم Service Connection ديال SonarQube Cloud
-  SONAR_ORG: 'YOUR_SONAR_ORG'
-  SONAR_PROJECT_KEY: 'YOUR_PROJECT_KEY'
-  SONAR_PROJECT_NAME: 'Akaunting'
+  # ---------- SERVICE CONNECTIONS (حسب صورتك) ----------
+  SONAR_SC: 'SonarCloudSC'
+  DOCKER_SC: 'DockerHubSC'
+
+  # ---------- SONARCLOUD PROJECT ----------
+  SONAR_ORG: 'bahmedilyas2'
+  SONAR_PROJECT_KEY: 'bahmedilyas2_projet_devops'
+  SONAR_PROJECT_NAME: 'projet_devops'
 
   # ---------- DOCKER ----------
-  DOCKER_SC: 'DockerHubSC'          # اسم Docker Registry Service Connection
-  DOCKER_REPO: 'youruser/akaunting' # repo فـ DockerHub أو ACR
+  DOCKER_REPO: 'ilyase25/akaunting'   # لازم تكون username/repo
   IMAGE_TAG: '$(Build.BuildId)'
 
-  # ---------- DEPLOY (local docker host = نفس الماكينة ديال agent) ----------
+  # ---------- DEPLOY ----------
   DEPLOY_PORT: '8080'
   DEPLOY_ENV_FILE: '$(Pipeline.Workspace)\deploy.env'
 
@@ -42,7 +40,6 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
-
     steps:
     - checkout: self
       clean: true
@@ -74,11 +71,8 @@ stages:
 
     - powershell: |
         $ErrorActionPreference = "Stop"
-
-        # Composer cache
         $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
 
-        # Prepare env (sqlite)
         if (!(Test-Path ".env")) {
           if (Test-Path ".env.example") { Copy-Item ".env.example" ".env" }
           elseif (Test-Path ".env.testing") { Copy-Item ".env.testing" ".env" }
@@ -114,63 +108,48 @@ stages:
       displayName: "Composer install + Artisan test"
 
 # =========================
-# STAGE 2 : SECURITY (SonarQube Cloud)
+# STAGE 2 : SECURITY (SonarCloud)
 # =========================
 - stage: security
-  displayName: "Security (QubeCloud / SonarQube Cloud)"
+  displayName: "Security (SonarCloud)"
   dependsOn: test
   condition: succeeded()
   jobs:
   - job: sonar
-    displayName: "SonarQube Cloud analysis"
+    displayName: "SonarCloud analysis"
     pool:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
-
     steps:
     - checkout: self
       clean: true
 
     - powershell: |
         java -version
-      displayName: "Check Java (required for scanner)"
-      # إذا ماكانش Java منصّب فـ agent، هاد step غادي يطيح.
-      # self-hosted agents خاصهم Java minimal :contentReference[oaicite:3]{index=3}
+      displayName: "Check Java"
 
-    # SonarQube Cloud tasks: SonarCloudPrepare/Analyze/Publish :contentReference[oaicite:4]{index=4}
-    -- task: SonarCloudPrepare@4
-  inputs:
-    SonarCloud: '$(SONAR_SC)'
-    organization: '$(SONAR_ORG)'
-    scannerMode: 'cli'
-    configMode: 'manual'
-    cliProjectKey: '$(SONAR_PROJECT_KEY)'
-    cliProjectName: '$(SONAR_PROJECT_NAME)'
-    cliSources: '.'
-    extraProperties: |
-      sonar.sourceEncoding=UTF-8
-      sonar.exclusions=vendor/**,node_modules/**,storage/**,dist/**,public/**,bootstrap/cache/**,**/*.min.js
-  displayName: "SonarCloud Prepare"
+    - task: SonarCloudPrepare@4
+      inputs:
+        SonarCloud: '$(SONAR_SC)'
+        organization: '$(SONAR_ORG)'
+        scannerMode: 'cli'
+        configMode: 'manual'
+        cliProjectKey: '$(SONAR_PROJECT_KEY)'
+        cliProjectName: '$(SONAR_PROJECT_NAME)'
+        cliSources: '.'
+        extraProperties: |
+          sonar.sourceEncoding=UTF-8
+          sonar.exclusions=vendor/**,node_modules/**,storage/**,dist/**,public/**,bootstrap/cache/**,**/*.min.js
+      displayName: "SonarCloud Prepare"
 
-# (اختياري) ثبّت/حدد JAVA_HOME على JDK 17 في جهاز الـ Agent
-- powershell: |
-    $ErrorActionPreference = "Stop"
-    # عدّل المسار حسب مكان Java عندك
-    $env:JAVA_HOME = "C:\Program Files\Java\jdk-17"
-    $env:PATH = "$env:JAVA_HOME\bin;$env:PATH"
-    java -version
-  displayName: "Set JAVA_HOME to JDK 17"
+    - task: SonarCloudAnalyze@4
+      displayName: "SonarCloud Analyze"
 
-- task: SonarCloudAnalyze@4
-  inputs:
-    jdkversion: 'JAVA_HOME'
-  displayName: "SonarCloud Analyze"
-
-- task: SonarCloudPublish@4
-  inputs:
-    pollingTimeoutSec: '120'
-  displayName: "SonarCloud Quality Gate"
+    - task: SonarCloudPublish@4
+      inputs:
+        pollingTimeoutSec: '120'
+      displayName: "SonarCloud Quality Gate"
 
 # =========================
 # STAGE 3 : BUILD DIST + ZIP
@@ -186,7 +165,6 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
-
     steps:
     - checkout: self
       clean: true
@@ -207,14 +185,12 @@ stages:
         path: $(NPM_CACHE_DIR)
       displayName: "Cache NPM"
 
-    # ---------- BACKEND ----------
     - powershell: |
         $ErrorActionPreference = "Stop"
         $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
         composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
       displayName: "Composer install (prod)"
 
-    # ---------- FRONTEND ----------
     - powershell: |
         $ErrorActionPreference = "Stop"
 
@@ -233,7 +209,6 @@ stages:
         .\node_modules\.bin\mix.cmd --production
       displayName: "Frontend build (Laravel Mix)"
 
-    # ---------- PREPARE DIST ----------
     - powershell: |
         $ErrorActionPreference = "Stop"
 
@@ -249,31 +224,21 @@ stages:
         Write-Host "Robocopy exit code: $rc"
         if ($rc -ge 8) { throw "Robocopy failed with exit code $rc" }
 
-        # مهم: رجّع exit code = 0 باش Azure ما يطيّحش step
         $global:LASTEXITCODE = 0
 
         New-Item -ItemType Directory -Force -Path "$dist\storage\framework" | Out-Null
         New-Item -ItemType Directory -Force -Path "$dist\storage\logs" | Out-Null
-
-        Write-Host "Dist file count:"
-        (Get-ChildItem $dist -Recurse | Measure-Object).Count
       displayName: "Prepare dist folder"
 
-    # ---------- ZIP ----------
     - powershell: |
         $ErrorActionPreference = "Stop"
-
         $dist = "$(Build.SourcesDirectory)\dist"
         $zip  = "$(Build.ArtifactStagingDirectory)\akaunting.zip"
-
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         if (Test-Path $zip) { Remove-Item $zip -Force }
         [System.IO.Compression.ZipFile]::CreateFromDirectory($dist, $zip)
-
-        Write-Host "ZIP ready: $zip"
       displayName: "Create ZIP"
 
-    # ---------- PUBLISH ARTIFACTS (Pipeline artifacts) ----------
     - task: PublishPipelineArtifact@1
       inputs:
         targetPath: '$(Build.ArtifactStagingDirectory)\akaunting.zip'
@@ -300,7 +265,6 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
-
     steps:
     - checkout: self
       clean: true
@@ -315,7 +279,6 @@ stages:
         containerRegistry: '$(DOCKER_SC)'
       displayName: "Docker login"
 
-    # Build context = dist artifact (فيها vendor + built assets)
     - task: Docker@2
       inputs:
         containerRegistry: '$(DOCKER_SC)'
@@ -342,7 +305,6 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
-
     steps:
     - checkout: self
       clean: true
@@ -356,7 +318,6 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        # ملف env للـ docker-compose (بدّل DB_* حسب متغيراتك/Secrets)
         $lines = @(
           "DOCKER_REPO=$(DOCKER_REPO)",
           "IMAGE_TAG=$(IMAGE_TAG)",
@@ -370,6 +331,5 @@ stages:
 
         docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
         docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans
-
         docker ps
       displayName: "docker compose pull + up"
