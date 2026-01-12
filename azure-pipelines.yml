@@ -22,6 +22,15 @@ variables:
 stages:
 # =========================
 # STAGE 1 : TEST
+#On récupère le code.
+
+#On installe les dépendances.
+
+#On crée le fichier .env.
+
+#On utilise SQLite.
+
+#On lance les tests Laravel.
 # =========================
 - stage: test
   displayName: "TEST"
@@ -36,7 +45,7 @@ stages:
     - checkout: self
       clean: true
 
-    # ✅ create cache dirs (fix tar chdir)
+    #  create cache dirs (fix tar chdir)
     - powershell: |
         New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
         New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
@@ -92,7 +101,12 @@ stages:
       displayName: "Install + Test"
 
 # =========================
-# STAGE 2 : SECURITY (Gitleaks report) ✅ FIXED (no winget)
+# STAGE 2 : SECURITY (Gitleaks report)  
+#On analyse le code avec Gitleaks.
+
+#On cherche des mots de passe et des secrets.
+
+#On crée un rapport de sécurité.
 # =========================
 - stage: security
   displayName: "SECURITY (Gitleaks report)"
@@ -145,7 +159,7 @@ stages:
         & $gitleaksExe.FullName detect --source "$(Build.SourcesDirectory)" --no-git --redact `
           --report-format json --report-path "$report"
 
-        Write-Host "✅ Gitleaks report saved: $report"
+        Write-Host " Gitleaks report saved: $report"
       displayName: "Gitleaks scan (downloaded binary)"
 
     - task: PublishPipelineArtifact@1
@@ -156,6 +170,9 @@ stages:
 
 # =========================
 # STAGE 3 : BUILD (Docker build + push)
+#On se connecte à DockerHub.
+#On crée une image Docker.
+#On envoie l’image vers DockerHub.
 # =========================
 - stage: build
   displayName: "BUILD (Docker build & push)"
@@ -192,6 +209,9 @@ stages:
 
 # =========================
 # STAGE 4 : DEPLOY (docker compose)
+#On utilise Docker Compose.
+#On lance l’application automatiquement.
+#L’application fonctionne sur le port 8080.
 # =========================
 - stage: deploy
   displayName: "DEPLOY (docker compose)"
