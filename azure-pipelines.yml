@@ -221,6 +221,7 @@ stages:
           "DOCKER_REPO=$(DOCKER_REPO)",
           "IMAGE_TAG=$(IMAGE_TAG)",
           "APP_PORT=$(DEPLOY_PORT)",
+          "APP_KEY=$(APP_KEY)",
           "DB_HOST=db",
           "DB_DATABASE=akaunting",
           "DB_USERNAME=akaunting",
