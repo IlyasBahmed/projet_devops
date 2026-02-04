@@ -92,19 +92,23 @@ stages:
       displayName: "Install + Test"
 
 # =========================
-# STAGE 2 : SECURITY (Gitleaks report)  
+# STAGE : SECURITY
 # =========================
 - stage: security
-  displayName: "SECURITY (Gitleaks report)"
+  displayName: "SECURITY (Secrets, SAST, SCA)"
   dependsOn: test
   condition: succeeded()
+
   jobs:
-  - job: security_scan
-    displayName: "Secrets scan"
+
+  # -------------------------
+  # 1) GITLEAKS (Secrets)
+  # -------------------------
+  - job: gitleaks
+    displayName: "Secrets Scan (Gitleaks)"
     pool:
       name: $(AGENT_POOL)
-      demands:
-      - Agent.Name -equals $(AGENT_NAME)
+
     steps:
     - checkout: self
       clean: true
@@ -112,47 +116,89 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        # 1) Get latest Gitleaks release from GitHub
         $release = Invoke-RestMethod -Headers @{ "User-Agent" = "azdo-agent" } `
           -Uri "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
 
-        # 2) Pick Windows x64 zip
         $asset = $release.assets | Where-Object { $_.name -match "windows_x64\.zip$" } | Select-Object -First 1
-        if (-not $asset) { throw "Gitleaks Windows x64 zip not found in latest release." }
+        if (-not $asset) { throw "Gitleaks not found" }
 
-        # 3) Download + extract inside Pipeline workspace
         $toolsDir = "$(Pipeline.Workspace)\tools\gitleaks"
         New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 
         $zipPath = Join-Path $toolsDir $asset.name
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-
         Expand-Archive -Path $zipPath -DestinationPath $toolsDir -Force
 
-        # 4) Locate gitleaks.exe
         $gitleaksExe = Get-ChildItem -Path $toolsDir -Recurse -Filter "gitleaks.exe" | Select-Object -First 1
-        if (-not $gitleaksExe) { throw "gitleaks.exe not found after extract." }
+        & $gitleaksExe.FullName detect `
+          --source "$(Build.SourcesDirectory)" `
+          --no-git `
+          --redact `
+          --report-format json `
+          --report-path "$(Build.ArtifactStagingDirectory)\gitleaks.json"
 
-        # Verify tool works
-        & $gitleaksExe.FullName version
-
-        # 5) Create report
-        $reportDir = "$(Build.ArtifactStagingDirectory)"
-        New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-        $report = Join-Path $reportDir "gitleaks.json"
-
-        # 6) Scan
-        & $gitleaksExe.FullName detect --source "$(Build.SourcesDirectory)" --no-git --redact `
-          --report-format json --report-path "$report"
-
-        Write-Host " Gitleaks report saved: $report"
-      displayName: "Gitleaks scan (downloaded binary)"
+      displayName: "Run Gitleaks"
 
     - task: PublishPipelineArtifact@1
       inputs:
         targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
-        artifactName: 'security-gitleaks'
-      displayName: "Publish Gitleaks report"
+        artifactName: 'gitleaks-report'
+
+
+  # -------------------------
+  # 2) SAST (Semgrep)
+  # -------------------------
+  - job: sast
+    displayName: "SAST (Semgrep)"
+    pool:
+      vmImage: ubuntu-latest
+
+    steps:
+    - checkout: self
+
+    - script: |
+        pip install semgrep
+        semgrep scan \
+          --config=auto \
+          --severity ERROR \
+          --json \
+          --output semgrep.json || true
+      displayName: "Run Semgrep"
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: 'semgrep.json'
+        artifactName: 'sast-semgrep'
+
+
+  # -------------------------
+  # 3) SCA (Composer + npm)
+  # -------------------------
+  - job: sca
+    displayName: "SCA (Composer & npm)"
+    pool:
+      vmImage: ubuntu-latest
+
+    steps:
+    - checkout: self
+
+    - script: |
+        composer audit --format=json > composer-audit.json || true
+      displayName: "Composer audit"
+
+    - script: |
+        npm audit --json > npm-audit.json || true
+      displayName: "npm audit"
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: 'composer-audit.json'
+        artifactName: 'sca-composer'
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: 'npm-audit.json'
+        artifactName: 'sca-npm'
 
 # =========================
 # STAGE 3 : BUILD (Docker build + push)
