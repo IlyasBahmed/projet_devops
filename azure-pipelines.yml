@@ -201,10 +201,10 @@ stages:
         artifactName: 'sca-npm'
 
 # =========================
-# STAGE 3 : BUILD (Docker build + push)
+# STAGE 3 : BUILD (dist + Docker build + push)
 # =========================
 - stage: build
-  displayName: "BUILD (Docker build & push)"
+  displayName: "BUILD (dist + Docker build & push)"
   dependsOn: security
   condition: succeeded()
   jobs:
@@ -214,27 +214,64 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
+
     steps:
     - checkout: self
       clean: true
 
+    # --- Build dist (vendor + frontend build) ---
+    - powershell: |
+        $ErrorActionPreference = "Stop"
+
+        # Composer (prod)
+        composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
+
+        # Frontend build (Laravel Mix)
+        npm config set cache "$(NPM_CACHE_DIR)" --global
+        if (Test-Path "package-lock.json") { npm ci --no-audit --no-fund } else { npm install --no-audit --no-fund }
+        $env:PATH = "$(Resolve-Path .)\node_modules\.bin;$env:PATH"
+        .\node_modules\.bin\mix.cmd --production
+
+        # Prepare dist
+        $dist = "$(Build.SourcesDirectory)\dist"
+        if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+        robocopy "$(Build.SourcesDirectory)" "$dist" /MIR `
+          /XD ".git" ".github" "node_modules" "tests" "storage" "dist" `
+          /XF ".env" | Out-Null
+
+        $rc = $LASTEXITCODE
+        if ($rc -ge 8) { throw "Robocopy failed with exit code $rc" }
+        $global:LASTEXITCODE = 0
+
+        # Ensure writable dirs exist
+        New-Item -ItemType Directory -Force -Path "$dist\storage\framework" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$dist\storage\logs" | Out-Null
+
+        Write-Host "Check vendor autoload in dist:"
+        if (!(Test-Path "$dist\vendor\autoload.php")) { throw "dist\vendor\autoload.php is missing!" }
+      displayName: "Build dist (vendor + assets)"
+
+    # --- Docker login ---
     - task: Docker@2
       inputs:
         command: login
         containerRegistry: '$(DOCKER_SC)'
       displayName: "Docker login"
 
+    # --- Build & Push using Dockerfile.dist + dist as context ---
     - task: Docker@2
       inputs:
         containerRegistry: '$(DOCKER_SC)'
         repository: '$(DOCKER_REPO)'
         command: 'buildAndPush'
-        Dockerfile: '$(Build.SourcesDirectory)\Dockerfile'
-        buildContext: '$(Build.SourcesDirectory)'
+        Dockerfile: '$(Build.SourcesDirectory)\Dockerfile.dist'
+        buildContext: '$(Build.SourcesDirectory)\dist'
         tags: |
           $(IMAGE_TAG)
           latest
-      displayName: "Docker build & push"
+      displayName: "Docker build & push (dist)"
 
 # =========================
 # STAGE 4 : DEPLOY (docker compose)
