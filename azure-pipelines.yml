@@ -32,11 +32,11 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
+
     steps:
     - checkout: self
       clean: true
 
-    #  create cache dirs (fix tar chdir)
     - powershell: |
         New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
         New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
@@ -92,22 +92,21 @@ stages:
       displayName: "Install + Test"
 
 # =========================
-# STAGE : SECURITY
+# STAGE 2 : SECURITY
 # =========================
 - stage: security
   displayName: "SECURITY (Secrets, SAST, SCA)"
   dependsOn: test
   condition: succeeded()
-
   jobs:
 
-  # -------------------------
-  # 1) GITLEAKS (Secrets)
-  # -------------------------
+  # ---- 1) GITLEAKS ----
   - job: gitleaks
     displayName: "Secrets Scan (Gitleaks)"
     pool:
       name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
@@ -136,7 +135,6 @@ stages:
           --redact `
           --report-format json `
           --report-path "$(Build.ArtifactStagingDirectory)\gitleaks.json"
-
       displayName: "Run Gitleaks"
 
     - task: PublishPipelineArtifact@1
@@ -144,25 +142,29 @@ stages:
         targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
         artifactName: 'gitleaks-report'
 
-
-  # -------------------------
-  # 2) SAST (Semgrep)
-  # -------------------------
+  # ---- 2) SAST (Semgrep) ----
   - job: sast
     displayName: "SAST (Semgrep)"
     pool:
-      vmImage: ubuntu-latest
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
+      clean: true
 
-    - script: |
+    - powershell: |
+        $ErrorActionPreference = "Continue"
+        python --version
+        pip --version
         pip install semgrep
-        semgrep scan \
-          --config=auto \
-          --severity ERROR \
-          --json \
-          --output semgrep.json || true
+        # ما نخليش findings يطيحو الjob دابا
+        try {
+          semgrep scan --config=auto --severity ERROR --json --output semgrep.json
+        } catch {
+          Write-Host "Semgrep finished with findings (not failing the job)."
+        }
       displayName: "Run Semgrep"
 
     - task: PublishPipelineArtifact@1
@@ -170,24 +172,29 @@ stages:
         targetPath: 'semgrep.json'
         artifactName: 'sast-semgrep'
 
-
-  # -------------------------
-  # 3) SCA (Composer + npm)
-  # -------------------------
+  # ---- 3) SCA (Composer + npm) ----
   - job: sca
     displayName: "SCA (Composer & npm)"
     pool:
-      vmImage: ubuntu-latest
+      name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
+      clean: true
 
-    - script: |
-        composer audit --format=json > composer-audit.json || true
+    - powershell: |
+        $ErrorActionPreference = "Continue"
+        composer --version
+        composer audit --format=json > composer-audit.json
       displayName: "Composer audit"
 
-    - script: |
-        npm audit --json > npm-audit.json || true
+    - powershell: |
+        $ErrorActionPreference = "Continue"
+        node -v
+        npm -v
+        npm audit --json > npm-audit.json
       displayName: "npm audit"
 
     - task: PublishPipelineArtifact@1
@@ -219,20 +226,39 @@ stages:
     - checkout: self
       clean: true
 
-    # --- Build dist (vendor + frontend build) ---
+    - powershell: |
+        New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
+      displayName: "Create cache folders (build)"
+
+    - task: Cache@2
+      inputs:
+        key: 'composer | "$(Agent.OS)" | composer.lock'
+        restoreKeys: |
+          composer | "$(Agent.OS)"
+        path: $(COMPOSER_CACHE_DIR)
+      displayName: "Cache Composer (build)"
+
+    - task: Cache@2
+      inputs:
+        key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
+        path: $(NPM_CACHE_DIR)
+      displayName: "Cache NPM (build)"
+
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        # Composer (prod)
+        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
+        npm config set cache "$(NPM_CACHE_DIR)" --global
+
         composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
 
-        # Frontend build (Laravel Mix)
-        npm config set cache "$(NPM_CACHE_DIR)" --global
         if (Test-Path "package-lock.json") { npm ci --no-audit --no-fund } else { npm install --no-audit --no-fund }
         $env:PATH = "$(Resolve-Path .)\node_modules\.bin;$env:PATH"
         .\node_modules\.bin\mix.cmd --production
 
-        # Prepare dist
         $dist = "$(Build.SourcesDirectory)\dist"
         if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
         New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -245,22 +271,18 @@ stages:
         if ($rc -ge 8) { throw "Robocopy failed with exit code $rc" }
         $global:LASTEXITCODE = 0
 
-        # Ensure writable dirs exist
         New-Item -ItemType Directory -Force -Path "$dist\storage\framework" | Out-Null
         New-Item -ItemType Directory -Force -Path "$dist\storage\logs" | Out-Null
 
-        Write-Host "Check vendor autoload in dist:"
         if (!(Test-Path "$dist\vendor\autoload.php")) { throw "dist\vendor\autoload.php is missing!" }
       displayName: "Build dist (vendor + assets)"
 
-    # --- Docker login ---
     - task: Docker@2
       inputs:
         command: login
         containerRegistry: '$(DOCKER_SC)'
       displayName: "Docker login"
 
-    # --- Build & Push using Dockerfile.dist + dist as context ---
     - task: Docker@2
       inputs:
         containerRegistry: '$(DOCKER_SC)'
@@ -287,6 +309,7 @@ stages:
       name: $(AGENT_POOL)
       demands:
       - Agent.Name -equals $(AGENT_NAME)
+
     steps:
     - checkout: self
       clean: true
@@ -313,7 +336,11 @@ stages:
         Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
 
         docker compose version
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" down
         docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
-        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans --force-recreate
         docker ps
-      displayName: "docker compose pull + up"
+
+        # تحقق سريع من autoload داخل الكونتينر
+        docker exec -i akaunting_app sh -lc "ls -la /var/www/html/vendor/autoload.php"
+      displayName: "docker compose (recreate) + verify"
