@@ -142,9 +142,9 @@ stages:
         targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
         artifactName: 'gitleaks-report'
 
-  # ---- 2) SAST (Semgrep) ----
+  # ---- 2) SAST (Semgrep via Docker) ----
   - job: sast
-    displayName: "SAST (Semgrep)"
+    displayName: "SAST (Semgrep via Docker)"
     pool:
       name: $(AGENT_POOL)
       demands:
@@ -156,21 +156,30 @@ stages:
 
     - powershell: |
         $ErrorActionPreference = "Continue"
-        python --version
-        pip --version
-        pip install semgrep
-        # ما نخليش findings يطيحو الjob دابا
-        try {
+        Set-Location "$(Build.SourcesDirectory)"
+
+        docker --version
+        docker info | findstr -i "OSType"
+
+        docker run --rm `
+          -v "${PWD}:/src" `
+          -w /src `
+          returntocorp/semgrep `
           semgrep scan --config=auto --severity ERROR --json --output semgrep.json
-        } catch {
-          Write-Host "Semgrep finished with findings (not failing the job)."
+
+        if (!(Test-Path "semgrep.json")) {
+          '{"error":"semgrep.json was not generated (semgrep failed)."}' | Out-File -Encoding utf8 "semgrep.json"
         }
-      displayName: "Run Semgrep"
+
+        Get-ChildItem "semgrep.json" | Format-List
+      displayName: "Run Semgrep (Docker)"
 
     - task: PublishPipelineArtifact@1
       inputs:
-        targetPath: 'semgrep.json'
+        targetPath: '$(Build.SourcesDirectory)\semgrep.json'
         artifactName: 'sast-semgrep'
+      condition: always()
+      displayName: "Publish Semgrep report"
 
   # ---- 3) SCA (Composer + npm) ----
   - job: sca
@@ -188,6 +197,7 @@ stages:
         $ErrorActionPreference = "Continue"
         composer --version
         composer audit --format=json > composer-audit.json
+        if (!(Test-Path "composer-audit.json")) { '{}' | Out-File -Encoding utf8 "composer-audit.json" }
       displayName: "Composer audit"
 
     - powershell: |
@@ -195,17 +205,22 @@ stages:
         node -v
         npm -v
         npm audit --json > npm-audit.json
+        if (!(Test-Path "npm-audit.json")) { '{}' | Out-File -Encoding utf8 "npm-audit.json" }
       displayName: "npm audit"
 
     - task: PublishPipelineArtifact@1
       inputs:
-        targetPath: 'composer-audit.json'
+        targetPath: '$(Build.SourcesDirectory)\composer-audit.json'
         artifactName: 'sca-composer'
+      condition: always()
+      displayName: "Publish Composer audit"
 
     - task: PublishPipelineArtifact@1
       inputs:
-        targetPath: 'npm-audit.json'
+        targetPath: '$(Build.SourcesDirectory)\npm-audit.json'
         artifactName: 'sca-npm'
+      condition: always()
+      displayName: "Publish npm audit"
 
 # =========================
 # STAGE 3 : BUILD (dist + Docker build + push)
@@ -341,6 +356,5 @@ stages:
         docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans --force-recreate
         docker ps
 
-        # تحقق سريع من autoload داخل الكونتينر
         docker exec -i akaunting_app sh -lc "ls -la /var/www/html/vendor/autoload.php"
       displayName: "docker compose (recreate) + verify"
