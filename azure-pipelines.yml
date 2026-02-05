@@ -19,10 +19,10 @@ variables:
   DEPLOY_PORT: '8080'
   DEPLOY_ENV_FILE: '$(Pipeline.Workspace)\deploy.env'
 
-# =====================================================
-# STAGE 1 : TEST
-# =====================================================
 stages:
+# =========================
+# STAGE 1 : TEST
+# =========================
 - stage: test
   displayName: "TEST"
   jobs:
@@ -38,34 +38,52 @@ stages:
       clean: true
 
     - powershell: |
-        New-Item -ItemType Directory -Force "$(COMPOSER_CACHE_DIR)" | Out-Null
-        New-Item -ItemType Directory -Force "$(NPM_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
       displayName: "Create cache folders"
 
     - task: Cache@2
       inputs:
         key: 'composer | "$(Agent.OS)" | composer.lock'
+        restoreKeys: |
+          composer | "$(Agent.OS)"
         path: $(COMPOSER_CACHE_DIR)
       displayName: "Cache Composer"
 
     - task: Cache@2
       inputs:
         key: 'npm | "$(Agent.OS)" | package-lock.json'
+        restoreKeys: |
+          npm | "$(Agent.OS)"
         path: $(NPM_CACHE_DIR)
       displayName: "Cache NPM"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
+
         $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
         npm config set cache "$(NPM_CACHE_DIR)" --global
 
         if (!(Test-Path ".env")) {
-          Copy-Item ".env.example" ".env"
+          if (Test-Path ".env.example") { Copy-Item ".env.example" ".env" }
+          elseif (Test-Path ".env.testing") { Copy-Item ".env.testing" ".env" }
+          else {
+            Set-Content -Path ".env" -Value @(
+              "APP_ENV=testing",
+              "APP_KEY=",
+              "APP_DEBUG=true",
+              "DB_CONNECTION=sqlite",
+              "DB_DATABASE=database/database.sqlite",
+              "CACHE_DRIVER=array",
+              "SESSION_DRIVER=array",
+              "QUEUE_CONNECTION=sync"
+            ) -Encoding utf8
+          }
         }
 
-        New-Item -ItemType Directory -Force database | Out-Null
+        New-Item -ItemType Directory -Force -Path "database" | Out-Null
         if (!(Test-Path "database/database.sqlite")) {
-          New-Item -ItemType File "database/database.sqlite" | Out-Null
+          New-Item -ItemType File -Force "database/database.sqlite" | Out-Null
         }
 
         composer install --no-interaction --prefer-dist --no-progress
@@ -73,19 +91,22 @@ stages:
         php artisan test
       displayName: "Install + Test"
 
-# =====================================================
-# STAGE 2 : SECURITY (GITLEAKS)
-# =====================================================
+# =========================
+# STAGE 2 : SECURITY
+# =========================
 - stage: security
-  displayName: "SECURITY"
+  displayName: "SECURITY (Secrets, SAST, SCA)"
   dependsOn: test
   condition: succeeded()
-
   jobs:
+
+  # ---- 1) GITLEAKS ----
   - job: gitleaks
-    displayName: "Secrets scan (Gitleaks)"
+    displayName: "Secrets Scan (Gitleaks)"
     pool:
       name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
@@ -94,21 +115,21 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        $release = Invoke-RestMethod -Headers @{ "User-Agent"="azdo" } `
+        $release = Invoke-RestMethod -Headers @{ "User-Agent" = "azdo-agent" } `
           -Uri "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
 
-        $asset = $release.assets | Where-Object { $_.name -match "windows_x64.zip" } | Select-Object -First 1
+        $asset = $release.assets | Where-Object { $_.name -match "windows_x64\.zip$" } | Select-Object -First 1
         if (-not $asset) { throw "Gitleaks not found" }
 
-        $tools = "$(Pipeline.Workspace)\gitleaks"
-        New-Item -ItemType Directory -Force $tools | Out-Null
+        $toolsDir = "$(Pipeline.Workspace)\tools\gitleaks"
+        New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 
-        $zip = Join-Path $tools $asset.name
-        Invoke-WebRequest $asset.browser_download_url -OutFile $zip
-        Expand-Archive $zip $tools -Force
+        $zipPath = Join-Path $toolsDir $asset.name
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
+        Expand-Archive -Path $zipPath -DestinationPath $toolsDir -Force
 
-        $exe = Get-ChildItem $tools -Recurse -Filter gitleaks.exe | Select-Object -First 1
-        & $exe.FullName detect `
+        $gitleaksExe = Get-ChildItem -Path $toolsDir -Recurse -Filter "gitleaks.exe" | Select-Object -First 1
+        & $gitleaksExe.FullName detect `
           --source "$(Build.SourcesDirectory)" `
           --no-git `
           --redact `
@@ -120,6 +141,8 @@ stages:
       inputs:
         targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
         artifactName: 'gitleaks-report'
+
+ 
 
 # =====================================================
 # STAGE 3 : BUILD (OPTIMIZED & LIGHT)
@@ -205,19 +228,20 @@ stages:
           latest
       displayName: "Docker build & push"
 
-# =====================================================
-# STAGE 4 : DEPLOY
-# =====================================================
+# =========================
+# STAGE 4 : DEPLOY (docker compose)
+# =========================
 - stage: deploy
-  displayName: "DEPLOY"
+  displayName: "DEPLOY (docker compose)"
   dependsOn: build
-  condition: succeeded()
-
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: deploy_local
-    displayName: "Deploy with docker compose"
+    displayName: "Deploy on agent machine"
     pool:
       name: $(AGENT_POOL)
+      demands:
+      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
@@ -227,12 +251,12 @@ stages:
       inputs:
         command: login
         containerRegistry: '$(DOCKER_SC)'
-      displayName: "Docker login"
+      displayName: "Docker login (deploy)"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        @(
+        $lines = @(
           "DOCKER_REPO=$(DOCKER_REPO)",
           "IMAGE_TAG=$(IMAGE_TAG)",
           "APP_PORT=$(DEPLOY_PORT)",
@@ -241,9 +265,14 @@ stages:
           "DB_DATABASE=akaunting",
           "DB_USERNAME=akaunting",
           "DB_PASSWORD=ChangeMeStrongPassword"
-        ) | Out-File -Encoding utf8 "$(DEPLOY_ENV_FILE)"
+        )
+        Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
 
+        docker compose version
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" down
         docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
-        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --force-recreate
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans --force-recreate
         docker ps
-      displayName: "Deploy app"
+
+        docker exec -i akaunting_app sh -lc "ls -la /var/www/html/vendor/autoload.php"
+      displayName: "docker compose (recreate) + verify"
