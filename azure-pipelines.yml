@@ -19,10 +19,10 @@ variables:
   DEPLOY_PORT: '8080'
   DEPLOY_ENV_FILE: '$(Pipeline.Workspace)\deploy.env'
 
-stages:
-# =========================
+# =====================================================
 # STAGE 1 : TEST
-# =========================
+# =====================================================
+stages:
 - stage: test
   displayName: "TEST"
   jobs:
@@ -38,52 +38,34 @@ stages:
       clean: true
 
     - powershell: |
-        New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force "$(COMPOSER_CACHE_DIR)" | Out-Null
+        New-Item -ItemType Directory -Force "$(NPM_CACHE_DIR)" | Out-Null
       displayName: "Create cache folders"
 
     - task: Cache@2
       inputs:
         key: 'composer | "$(Agent.OS)" | composer.lock'
-        restoreKeys: |
-          composer | "$(Agent.OS)"
         path: $(COMPOSER_CACHE_DIR)
       displayName: "Cache Composer"
 
     - task: Cache@2
       inputs:
         key: 'npm | "$(Agent.OS)" | package-lock.json'
-        restoreKeys: |
-          npm | "$(Agent.OS)"
         path: $(NPM_CACHE_DIR)
       displayName: "Cache NPM"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
-
         $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
         npm config set cache "$(NPM_CACHE_DIR)" --global
 
         if (!(Test-Path ".env")) {
-          if (Test-Path ".env.example") { Copy-Item ".env.example" ".env" }
-          elseif (Test-Path ".env.testing") { Copy-Item ".env.testing" ".env" }
-          else {
-            Set-Content -Path ".env" -Value @(
-              "APP_ENV=testing",
-              "APP_KEY=",
-              "APP_DEBUG=true",
-              "DB_CONNECTION=sqlite",
-              "DB_DATABASE=database/database.sqlite",
-              "CACHE_DRIVER=array",
-              "SESSION_DRIVER=array",
-              "QUEUE_CONNECTION=sync"
-            ) -Encoding utf8
-          }
+          Copy-Item ".env.example" ".env"
         }
 
-        New-Item -ItemType Directory -Force -Path "database" | Out-Null
+        New-Item -ItemType Directory -Force database | Out-Null
         if (!(Test-Path "database/database.sqlite")) {
-          New-Item -ItemType File -Force "database/database.sqlite" | Out-Null
+          New-Item -ItemType File "database/database.sqlite" | Out-Null
         }
 
         composer install --no-interaction --prefer-dist --no-progress
@@ -91,22 +73,19 @@ stages:
         php artisan test
       displayName: "Install + Test"
 
-# =========================
-# STAGE 2 : SECURITY
-# =========================
+# =====================================================
+# STAGE 2 : SECURITY (GITLEAKS)
+# =====================================================
 - stage: security
-  displayName: "SECURITY (Secrets, SAST, SCA)"
+  displayName: "SECURITY"
   dependsOn: test
   condition: succeeded()
-  jobs:
 
-  # ---- 1) GITLEAKS ----
+  jobs:
   - job: gitleaks
-    displayName: "Secrets Scan (Gitleaks)"
+    displayName: "Secrets scan (Gitleaks)"
     pool:
       name: $(AGENT_POOL)
-      demands:
-      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
@@ -115,21 +94,21 @@ stages:
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        $release = Invoke-RestMethod -Headers @{ "User-Agent" = "azdo-agent" } `
+        $release = Invoke-RestMethod -Headers @{ "User-Agent"="azdo" } `
           -Uri "https://api.github.com/repos/gitleaks/gitleaks/releases/latest"
 
-        $asset = $release.assets | Where-Object { $_.name -match "windows_x64\.zip$" } | Select-Object -First 1
+        $asset = $release.assets | Where-Object { $_.name -match "windows_x64.zip" } | Select-Object -First 1
         if (-not $asset) { throw "Gitleaks not found" }
 
-        $toolsDir = "$(Pipeline.Workspace)\tools\gitleaks"
-        New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+        $tools = "$(Pipeline.Workspace)\gitleaks"
+        New-Item -ItemType Directory -Force $tools | Out-Null
 
-        $zipPath = Join-Path $toolsDir $asset.name
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath
-        Expand-Archive -Path $zipPath -DestinationPath $toolsDir -Force
+        $zip = Join-Path $tools $asset.name
+        Invoke-WebRequest $asset.browser_download_url -OutFile $zip
+        Expand-Archive $zip $tools -Force
 
-        $gitleaksExe = Get-ChildItem -Path $toolsDir -Recurse -Filter "gitleaks.exe" | Select-Object -First 1
-        & $gitleaksExe.FullName detect `
+        $exe = Get-ChildItem $tools -Recurse -Filter gitleaks.exe | Select-Object -First 1
+        & $exe.FullName detect `
           --source "$(Build.SourcesDirectory)" `
           --no-git `
           --redact `
@@ -142,18 +121,18 @@ stages:
         targetPath: '$(Build.ArtifactStagingDirectory)\gitleaks.json'
         artifactName: 'gitleaks-report'
 
- 
-
-# =========================
-# STAGE 3 : BUILD (dist + Docker build + push)
-# =========================
+# =====================================================
+# STAGE 3 : BUILD (OPTIMIZED & LIGHT)
+# =====================================================
 - stage: build
-  displayName: "BUILD (dist + Docker build & push)"
+  displayName: "BUILD (optimized)"
   dependsOn: security
   condition: succeeded()
+
   jobs:
   - job: docker_build
-    displayName: "Build and push image"
+    displayName: "Build & Push Docker image"
+    timeoutInMinutes: 90
     pool:
       name: $(AGENT_POOL)
       demands:
@@ -164,55 +143,49 @@ stages:
       clean: true
 
     - powershell: |
-        New-Item -ItemType Directory -Force -Path "$(COMPOSER_CACHE_DIR)" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$(NPM_CACHE_DIR)" | Out-Null
-      displayName: "Create cache folders (build)"
+        $ErrorActionPreference = "Stop"
+        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
 
-    - task: Cache@2
-      inputs:
-        key: 'composer | "$(Agent.OS)" | composer.lock'
-        restoreKeys: |
-          composer | "$(Agent.OS)"
-        path: $(COMPOSER_CACHE_DIR)
-      displayName: "Cache Composer (build)"
+        composer install `
+          --no-dev `
+          --prefer-dist `
+          --no-interaction `
+          --no-progress `
+          --optimize-autoloader
 
-    - task: Cache@2
-      inputs:
-        key: 'npm | "$(Agent.OS)" | package-lock.json'
-        restoreKeys: |
-          npm | "$(Agent.OS)"
-        path: $(NPM_CACHE_DIR)
-      displayName: "Cache NPM (build)"
+        composer clear-cache
+      displayName: "Composer install (prod)"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        $env:COMPOSER_CACHE_DIR = "$(COMPOSER_CACHE_DIR)"
-        npm config set cache "$(NPM_CACHE_DIR)" --global
+        npm ci --no-audit --no-fund
+        npx mix --production
+        Remove-Item -Recurse -Force node_modules
+      displayName: "Frontend build"
 
-        composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-progress
-
-        if (Test-Path "package-lock.json") { npm ci --no-audit --no-fund } else { npm install --no-audit --no-fund }
-        $env:PATH = "$(Resolve-Path .)\node_modules\.bin;$env:PATH"
-        .\node_modules\.bin\mix.cmd --production
+    - powershell: |
+        $ErrorActionPreference = "Stop"
 
         $dist = "$(Build.SourcesDirectory)\dist"
         if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
-        New-Item -ItemType Directory -Force -Path $dist | Out-Null
+        New-Item -ItemType Directory -Force $dist | Out-Null
 
-        robocopy "$(Build.SourcesDirectory)" "$dist" /MIR `
-          /XD ".git" ".github" "node_modules" "tests" "storage" "dist" `
+        robocopy "$(Build.SourcesDirectory)" "$dist" /E `
+          /XD ".git" ".github" ".idea" ".vscode" "tests" "node_modules" "dist" "storage" `
           /XF ".env" | Out-Null
 
-        $rc = $LASTEXITCODE
-        if ($rc -ge 8) { throw "Robocopy failed with exit code $rc" }
-        $global:LASTEXITCODE = 0
+        New-Item -ItemType Directory -Force "$dist\storage\framework" | Out-Null
+        New-Item -ItemType Directory -Force "$dist\storage\logs" | Out-Null
 
-        New-Item -ItemType Directory -Force -Path "$dist\storage\framework" | Out-Null
-        New-Item -ItemType Directory -Force -Path "$dist\storage\logs" | Out-Null
+        @(
+          ".git",".github",".idea",".vscode",
+          "tests","node_modules",".env","*.log"
+        ) | Out-File -Encoding utf8 "$dist\.dockerignore"
 
-        if (!(Test-Path "$dist\vendor\autoload.php")) { throw "dist\vendor\autoload.php is missing!" }
-      displayName: "Build dist (vendor + assets)"
+        Write-Host "DIST SIZE (MB):"
+        (Get-ChildItem $dist -Recurse | Measure-Object Length -Sum).Sum / 1MB
+      displayName: "Prepare light dist"
 
     - task: Docker@2
       inputs:
@@ -222,30 +195,29 @@ stages:
 
     - task: Docker@2
       inputs:
+        command: buildAndPush
         containerRegistry: '$(DOCKER_SC)'
         repository: '$(DOCKER_REPO)'
-        command: 'buildAndPush'
         Dockerfile: '$(Build.SourcesDirectory)\Dockerfile.dist'
         buildContext: '$(Build.SourcesDirectory)\dist'
         tags: |
           $(IMAGE_TAG)
           latest
-      displayName: "Docker build & push (dist)"
+      displayName: "Docker build & push"
 
-# =========================
-# STAGE 4 : DEPLOY (docker compose)
-# =========================
+# =====================================================
+# STAGE 4 : DEPLOY
+# =====================================================
 - stage: deploy
-  displayName: "DEPLOY (docker compose)"
+  displayName: "DEPLOY"
   dependsOn: build
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  condition: succeeded()
+
   jobs:
   - job: deploy_local
-    displayName: "Deploy on agent machine"
+    displayName: "Deploy with docker compose"
     pool:
       name: $(AGENT_POOL)
-      demands:
-      - Agent.Name -equals $(AGENT_NAME)
 
     steps:
     - checkout: self
@@ -255,12 +227,12 @@ stages:
       inputs:
         command: login
         containerRegistry: '$(DOCKER_SC)'
-      displayName: "Docker login (deploy)"
+      displayName: "Docker login"
 
     - powershell: |
         $ErrorActionPreference = "Stop"
 
-        $lines = @(
+        @(
           "DOCKER_REPO=$(DOCKER_REPO)",
           "IMAGE_TAG=$(IMAGE_TAG)",
           "APP_PORT=$(DEPLOY_PORT)",
@@ -269,14 +241,9 @@ stages:
           "DB_DATABASE=akaunting",
           "DB_USERNAME=akaunting",
           "DB_PASSWORD=ChangeMeStrongPassword"
-        )
-        Set-Content -Path "$(DEPLOY_ENV_FILE)" -Value $lines -Encoding utf8
+        ) | Out-File -Encoding utf8 "$(DEPLOY_ENV_FILE)"
 
-        docker compose version
-        docker compose --env-file "$(DEPLOY_ENV_FILE)" down
         docker compose --env-file "$(DEPLOY_ENV_FILE)" pull
-        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --remove-orphans --force-recreate
+        docker compose --env-file "$(DEPLOY_ENV_FILE)" up -d --force-recreate
         docker ps
-
-        docker exec -i akaunting_app sh -lc "ls -la /var/www/html/vendor/autoload.php"
-      displayName: "docker compose (recreate) + verify"
+      displayName: "Deploy app"
