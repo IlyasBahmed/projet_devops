@@ -22,6 +22,13 @@ variables:
 stages:
 # =========================
 # STAGE 1 : TEST
+#Installation des dépendances avec Composer
+
+#Création du fichier .env pour les tests
+
+#Utilisation de SQLite
+
+#Exécution des tests Laravel avec PHPUnit
 # =========================
 - stage: test
   displayName: "TEST"
@@ -93,6 +100,12 @@ stages:
 
 # =========================
 # STAGE 2 : SECURITY
+#Utilisation de Gitleaks
+
+#Scan des secrets dans le code
+
+#Génération d’un rapport JSON
+
 # =========================
 - stage: security
   displayName: "SECURITY (Secrets, SAST, SCA)"
@@ -146,6 +159,16 @@ stages:
 
 # =====================================================
 # STAGE 3 : BUILD (OPTIMIZED & LIGHT)
+#Installation des dépendances production
+
+#Build du frontend
+
+#Création d’un dossier dist léger
+
+#Build et push de l’image Docker vers Docker Hub
+
+
+
 # =====================================================
 - stage: build
   displayName: "BUILD (optimized)"
@@ -230,6 +253,13 @@ stages:
 
 # =========================
 # STAGE 4 : DEPLOY (docker compose)
+#Exécution seulement sur la branche main
+
+#Création du fichier deploy.env
+
+#Pull de la nouvelle image
+
+#Redémarrage des conteneurs
 # =========================
 - stage: deploy
   displayName: "DEPLOY (docker compose)"
